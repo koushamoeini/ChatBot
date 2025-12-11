@@ -57,6 +57,8 @@ This project uses an "agentic" RAG flow: the model can call small tools (retriev
 
 - Retrieval uses sentence-transformer embeddings and a cosine similarity filter (controlled by `RELEVANCE_THRESHOLD`) that rejects irrelevant chunks.
 - Final answers are validated against the retrieved context: if the LLM's answer isn't supported by the retrieved chunks, the system returns a polite "no data" message instead of hallucinating an answer.
+- The bot now replies to simple greetings directly (e.g., "سلام", "خوبی؟").
+- The validation is slightly relaxed to avoid rejecting low-confidence but useful answers; if only weakly-related documents are available, the bot will give a `low-confidence` best-effort reply prefixed with a small disclaimer rather than always returning "no data".
 
 Usage Example (HTTP API)
 ------------------------
