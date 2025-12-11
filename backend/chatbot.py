@@ -3,7 +3,7 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 import openai
 import os
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from chromadb.errors import NotFoundError
 
 class RAGChatbot:
@@ -58,6 +58,39 @@ class RAGChatbot:
         except:
             return current_query
 
+    def summarize_chunks(self, chunks: List[Tuple[str, Dict[str, Any]]]) -> str:
+        """
+        Produce a short Farsi summary of the retrieved chunks to guide the agent.
+        """
+        if not chunks:
+            return ""
+        # Build a compact context to summarize
+        parts = []
+        for i, (text, meta) in enumerate(chunks, 1):
+            title = meta.get("source_title", "منبع نامشخص")
+            snippet = text if len(text) < 300 else text[:300] + "..."
+            parts.append(f"منبع {i}: {title} — {snippet}")
+
+        prompt = (
+            "شما یک خلاصه‌ساز دقیق هستید. لطفاً خلاصه‌ای کوتاه و مفید به زبان فارسی از متن‌های زیر تهیه کنید؛ "
+            "حداکثر 2-3 جمله و تمرکز روی نکات کلیدی که می‌تواند به پاسخ‌دهی کمک کند. \n\n"
+            + "\n\n".join(parts)
+        )
+
+        try:
+            completion = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "شما یک خلاصه‌ساز دقیق متن فارسی هستید."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.0,
+                max_tokens=150
+            )
+            return completion.choices[0].message.content.strip()
+        except Exception:
+            return ""
+
     def expand_query(self, query: str) -> List[str]:
         correction_prompt = f"""
         شما یک ویرایشگر زبان فارسی هستید. وظیفه شما این است که فقط و فقط اشتباهات املایی، نگارشی یا دستوری سوال زیر را اصلاح کنید.
@@ -96,6 +129,99 @@ class RAGChatbot:
                     seen.add(doc)
                     results.append((doc, meta))
         return results
+
+    def run_agent(self, question: str, history: List[Dict[str, str]], max_steps: int = 4) -> str:
+        """
+        A simple agentic ReAct-style loop that lets the model call tools (retrieve/summarize) and then return a final answer.
+
+        Action format expected from LLM (in a single JSON object in a single line):
+        {"action": "retrieve", "input": "<query>"}
+        {"action": "summarize", "input": "<summary context>"}
+        {"action": "final", "input": "<final answer>"}
+        """
+        # Prepare initial query
+        standalone = self.rewrite_query(question, history)
+        expanded = self.expand_query(standalone)
+
+        system_prompt = (
+            "شما یک عامل (Agent) به زبان فارسی هستید که از ابزارهای زیر استفاده می‌کند:\n"
+            "TOOLS:\n"
+            "- retrieve(query): دریافت بخش‌های مرتبط از پایگاه دانش\n"
+            "- summarize(chunks): خلاصه کردن بخش‌های دریافت‌شده\n"
+            "فرمت پاسخ‌ها باید یک شیٔ JSON تک‌خطی با کلیدهای 'action' و 'input' یا 'final' باشد.\n"
+            "اگر آمادهٔ ارائه پاسخ نهایی هستید، از action='final' استفاده کنید و پاسخ را در 'input' قرار دهید.\n"
+            "همیشه به زبان فارسی پاسخ بدهید."
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"سوال اصلی: {question}\nتوضیح: اگر لازم است از ابزارها استفاده کن."}
+        ]
+
+        tool_outputs: List[str] = []
+        chunks_cache: Optional[List[Tuple[str, Dict[str, Any]]]] = None
+
+        for step in range(max_steps):
+            try:
+                completion = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=0.2,
+                    max_tokens=400,
+                )
+                response_text = completion.choices[0].message.content.strip()
+            except Exception as e:
+                return "یک خطا هنگام ارتباط با مدل رخ داد، لطفا بعدا تلاش کنید."
+
+            # Try parse JSON
+            action = None
+            payload = None
+            try:
+                import json as _json
+                parsed = _json.loads(response_text)
+                action = parsed.get("action")
+                payload = parsed.get("input")
+            except Exception:
+                # If parsing fails, assume final answer is present as plain text
+                return response_text
+
+            if action == "retrieve":
+                # Use the agent's retrieve tool
+                if not payload:
+                    messages.append({"role": "assistant", "content": "Action 'retrieve' requires 'input'."})
+                    continue
+                q_for_retrieve = payload
+                res_chunks = self.retrieve_relevant_chunks([q_for_retrieve])
+                chunks_cache = res_chunks
+                # Append tool output to messages
+                output_text = "\n\n".join([f"[{i+1}] {t} (meta: {m})" for i, (t, m) in enumerate(res_chunks)])
+                tool_outputs.append(output_text)
+                messages.append({"role": "assistant", "content": f"TOOL_OUTPUT_RETRIEVE: {output_text}"})
+                continue
+
+            if action == "summarize":
+                if chunks_cache is None:
+                    messages.append({"role": "assistant", "content": "هیچ بخشی برای خلاصه کردن موجود نیست. ابتدا retrieve را اجرا کنید."})
+                    continue
+                summary = self.summarize_chunks(chunks_cache)
+                tool_outputs.append(summary)
+                messages.append({"role": "assistant", "content": f"TOOL_OUTPUT_SUMMARY: {summary}"})
+                continue
+
+            if action == "final":
+                # Use the provided final answer
+                answer_text = str(payload or "")
+                if not answer_text:
+                    # If empty, try to generate a final answer using cached chunks
+                    try:
+                        return self.generate_response(question, chunks_cache or [], history)
+                    except Exception:
+                        return "متاسفانه پاسخی تولید نشد."
+                return answer_text
+
+            # Unknown action; return as final
+            return response_text
+
 
     def generate_response(self, query: str, context_chunks: List[Tuple[str, Dict]], history: List[Dict]) -> str:
         """

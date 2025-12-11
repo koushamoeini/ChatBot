@@ -33,10 +33,8 @@ def ask(request):
         history = body.get('history', []) or []
 
         bot = get_chatbot()
-        standalone = bot.rewrite_query(question, history)
-        queries = bot.expand_query(standalone)
-        chunks = bot.retrieve_relevant_chunks(queries)
-        answer = bot.generate_response(question, chunks, history)
+        # Use agentic RAG flow (ReAct-style) which may call tools (retrieve/summarize) internally
+        answer = bot.run_agent(question, history)
 
         return JsonResponse({'answer': answer})
     except Exception as e:
