@@ -34,7 +34,8 @@ def ask(request):
 
         bot = get_chatbot()
         # Use agentic RAG flow (ReAct-style) which may call tools (retrieve/summarize) internally
-        answer = bot.run_agent(question, history)
+        allow_general_knowledge = bool(body.get('allow_general_knowledge', False))
+        answer = bot.run_agent(question, history, allow_general_knowledge=allow_general_knowledge)
 
         return JsonResponse({'answer': answer})
     except Exception as e:

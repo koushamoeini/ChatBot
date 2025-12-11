@@ -80,6 +80,11 @@ If there is not enough relevant information: the server responds with a user-fri
 ```json
 { "answer": "متاسفانه اطلاعات کافی برای پاسخ به این سوال در پایگاه دانش موجود نیست." }
 ```
+Optional `allow_general_knowledge` parameter:
+```json
+{ "question": "Who invented the lightbulb?", "allow_general_knowledge": true }
+```
+If `allow_general_knowledge` is set to `true`, the agent will attempt to answer using its general knowledge (LLM) when the KB doesn't contain supporting evidence, and will clearly prefix the response with a short disclaimer stating it's best-effort.
 
 Troubleshooting
 ---------------

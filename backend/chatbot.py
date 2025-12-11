@@ -224,7 +224,7 @@ class RAGChatbot:
         except Exception:
             return False, "خطا در ارزیابی پشتیبانی پاسخ از متن‌ها."
 
-    def run_agent(self, question: str, history: List[Dict[str, str]], max_steps: int = 4) -> str:
+    def run_agent(self, question: str, history: List[Dict[str, str]], max_steps: int = 4, allow_general_knowledge: bool = False) -> str:
         """
         A simple agentic ReAct-style loop that lets the model call tools (retrieve/summarize) and then return a final answer.
 
@@ -244,7 +244,9 @@ class RAGChatbot:
             "- summarize(chunks): خلاصه کردن بخش‌های دریافت‌شده\n"
             "فرمت پاسخ‌ها باید یک شیٔ JSON تک‌خطی با کلیدهای 'action' و 'input' یا 'final' باشد.\n"
             "اگر آمادهٔ ارائه پاسخ نهایی هستید، از action='final' استفاده کنید و پاسخ را در 'input' قرار دهید.\n"
-            "همیشه به زبان فارسی پاسخ بدهید."
+            "همیشه به زبان فارسی پاسخ بدهید. \n"
+            "هرگز متن کامل ابزارهای بازیابی را عیناً در پاسخ نهایی تکرار نکنید؛ از ابزارها فقط برای استنتاج استفاده کنید." 
+            "اگر پاسخ شما مبتنی بر اطلاعات عمومی (خارج از پایگاه دانش) است و `allow_general_knowledge` فعال است، آن را با یک پیش‌نویس کوتاه 'ممکن است اطلاعات ناقص باشد' ارائه دهید."
         )
 
         messages = [
@@ -307,7 +309,13 @@ class RAGChatbot:
                         if isinstance(m, dict):
                             m['_low_confidence'] = True
                 # Append tool output to messages
-                output_text = "\n\n".join([f"[{i+1}] {t} (meta: {m})" for i, (t, m) in enumerate(res_chunks)])
+                # Only include short snippets of the retrieved chunk to avoid LLM copying full documents
+                def _snippet(text: str, size: int = 200):
+                    if not isinstance(text, str):
+                        text = str(text)
+                    return text if len(text) <= size else text[:size] + "..."
+
+                output_text = "\n\n".join([f"[{i+1}] { _snippet(t) } (meta: {m})" for i, (t, m) in enumerate(res_chunks)])
                 tool_outputs.append(output_text)
                 messages.append({"role": "assistant", "content": f"TOOL_OUTPUT_RETRIEVE: {output_text}"})
                 continue
@@ -335,8 +343,8 @@ class RAGChatbot:
                     if supported:
                         return candidate
                     else:
-                        # If the agent retrieved only low-confidence matches, provide a best-effort answer prefaced
-                        if chunks_cache and any([m.get('_low_confidence') for _, m in chunks_cache if isinstance(m, dict)]):
+                        # If the agent retrieved only low-confidence matches, and general knowledge allowed, return best-effort
+                        if allow_general_knowledge and chunks_cache and any([m.get('_low_confidence') for _, m in chunks_cache if isinstance(m, dict)]):
                             return "ممکن است اطلاعات ناقص باشد، اما بر اساس منابع موجود: " + candidate
                         return "متاسفانه اطلاعات کافی برای پاسخ به این سوال در پایگاه دانش موجود نیست."
                 # Validate the provided final answer as well
@@ -348,7 +356,7 @@ class RAGChatbot:
                 supported2, reason2 = self.is_answer_supported(candidate, chunks_cache or [])
                 if supported2:
                     return candidate
-                if chunks_cache and any([m.get('_low_confidence') for _, m in chunks_cache if isinstance(m, dict)]):
+                if allow_general_knowledge and chunks_cache and any([m.get('_low_confidence') for _, m in chunks_cache if isinstance(m, dict)]):
                     return "ممکن است اطلاعات ناقص باشد، اما بر اساس منابع موجود: " + candidate
                 return "متاسفانه اطلاعات کافی برای پاسخ به این سوال در پایگاه دانش موجود نیست."
 
@@ -356,7 +364,7 @@ class RAGChatbot:
             supported, reason = self.is_answer_supported(response_text, chunks_cache or [])
             if supported:
                 return response_text
-            if chunks_cache and any([m.get('_low_confidence') for _, m in chunks_cache if isinstance(m, dict)]):
+            if allow_general_knowledge and chunks_cache and any([m.get('_low_confidence') for _, m in chunks_cache if isinstance(m, dict)]):
                 return "ممکن است اطلاعات ناقص باشد، اما بر اساس منابع موجود: " + response_text
             return "متاسفانه اطلاعات کافی برای پاسخ به این سوال در پایگاه دانش موجود نیست."
 
