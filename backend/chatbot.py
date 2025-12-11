@@ -67,6 +67,18 @@ class RAGChatbot:
         greetings = ["سلام", "hi", "hello", "درود", "hey"]
         return any(g in t for g in greetings)
 
+    def _strip_tool_outputs(self, text: str) -> str:
+        """Remove any tool-output markers from the final answer before sending to user."""
+        if not text:
+            return text
+        markers = ["TOOL_OUTPUT_RETRIEVE", "TOOL_OUTPUT_SUMMARY"]
+        lines = []
+        for line in text.splitlines():
+            if any(m in line for m in markers):
+                continue
+            lines.append(line)
+        return "\n".join(lines).strip()
+
     def summarize_chunks(self, chunks: List[Tuple[str, Dict[str, Any]]]) -> str:
         """
         Produce a short Farsi summary of the retrieved chunks to guide the agent.
@@ -208,10 +220,10 @@ class RAGChatbot:
                 q_for_retrieve = payload
                 res_chunks = self.retrieve_relevant_chunks([q_for_retrieve])
                 chunks_cache = res_chunks
-                # Append tool output to messages
+                # Append tool output to messages (keep concise and avoid leaking to user)
                 output_text = "\n\n".join([f"[{i+1}] {t} (meta: {m})" for i, (t, m) in enumerate(res_chunks)])
                 tool_outputs.append(output_text)
-                messages.append({"role": "assistant", "content": f"TOOL_OUTPUT_RETRIEVE: {output_text}"})
+                messages.append({"role": "system", "content": f"TOOL_OUTPUT_RETRIEVE: {output_text}"})
                 continue
 
             if action == "summarize":
@@ -220,7 +232,7 @@ class RAGChatbot:
                     continue
                 summary = self.summarize_chunks(chunks_cache)
                 tool_outputs.append(summary)
-                messages.append({"role": "assistant", "content": f"TOOL_OUTPUT_SUMMARY: {summary}"})
+                messages.append({"role": "system", "content": f"TOOL_OUTPUT_SUMMARY: {summary}"})
                 continue
 
             if action == "final":
@@ -235,10 +247,10 @@ class RAGChatbot:
                         return self.generate_response(question, chunks_cache or [], history)
                     except Exception:
                         return "متاسفانه پاسخی تولید نشد."
-                return answer_text
+                return self._strip_tool_outputs(answer_text)
 
-            # Unknown action; return as final
-            return response_text
+            # Unknown action; return as final but sanitized
+            return self._strip_tool_outputs(response_text)
 
 
     def generate_response(self, query: str, context_chunks: List[Tuple[str, Dict]], history: List[Dict]) -> str:
