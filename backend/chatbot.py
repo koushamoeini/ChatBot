@@ -1,5 +1,6 @@
 # backend/chatbot.py
 import chromadb
+import numpy as np
 from sentence_transformers import SentenceTransformer
 import openai
 import os
@@ -7,13 +8,16 @@ from typing import List, Tuple, Dict, Any, Optional
 from chromadb.errors import NotFoundError
 
 class RAGChatbot:
-    def __init__(self, api_key: str, base_url: str = "https://api.tapsage.com/openai/v1"):
+    def __init__(self, api_key: str, base_url: str = "https://api.tapsage.com/openai/v1", relevance_threshold: float = 0.6):
         # Embedding model
         self.embedding_model = SentenceTransformer("paraphrase-multilingual-mpnet-base-v2")
         
         # OpenAI client
         self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
         self.model = "gpt-4o-mini"
+
+        # Relevance threshold for semantic similarity filtering (0..1 cosine similarity)
+        self.relevance_threshold = relevance_threshold
 
         # ChromaDB
         self.chroma_client = chromadb.PersistentClient(path="./chroma_db")
@@ -118,17 +122,92 @@ class RAGChatbot:
         except:
             return [query]
 
+    def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
+        a = np.array(a)
+        b = np.array(b)
+        if a.size == 0 or b.size == 0:
+            return 0.0
+        denom = (np.linalg.norm(a) * np.linalg.norm(b))
+        if denom == 0:
+            return 0.0
+        return float(np.dot(a, b) / denom)
+
     def retrieve_relevant_chunks(self, queries: List[str], n_results: int = 6) -> List[Tuple[str, Dict[str, Any]]]:
         seen = set()
         results = []
         for q in queries:
             emb = self.embedding_model.encode(q).tolist()
             res = self.collection.query(query_embeddings=[emb], n_results=n_results)
-            for doc, meta in zip(res['documents'][0], res['metadatas'][0]):
-                if doc not in seen:
+            docs = res.get('documents', [[]])[0]
+            metas = res.get('metadatas', [[]])[0]
+            for doc, meta in zip(docs, metas):
+                if doc in seen:
+                    continue
+                # compute similarity between query embedding and the document text embedding
+                try:
+                    doc_emb = self.embedding_model.encode(doc).tolist()
+                    sim = self._cosine_similarity(emb, doc_emb)
+                except Exception:
+                    sim = 0.0
+                if sim >= self.relevance_threshold:
+                    # annotate meta with computed similarity for downstream processing/inspection
+                    meta = dict(meta) if isinstance(meta, dict) else {"source": str(meta)}
+                    meta["_similarity"] = sim
                     seen.add(doc)
                     results.append((doc, meta))
         return results
+
+    def is_answer_supported(self, answer: str, chunks: List[Tuple[str, Dict[str, Any]]]) -> Tuple[bool, str]:
+        """
+        Ask the model to validate whether the `answer` is supported by the `chunks`.
+        Returns (supported_bool, reason_str).
+        """
+        if not chunks:
+            return False, "هیچ زمینه‌ای برای ارزیابی وجود ندارد."
+
+        context_parts = []
+        for i, (text, meta) in enumerate(chunks, 1):
+            title = meta.get("source_title", "منبع نامشخص") if isinstance(meta, dict) else "منبع"
+            snippet = text if len(text) < 300 else text[:300] + "..."
+            context_parts.append(f"منبع {i}: {title} — {snippet}")
+
+        prompt = (
+            "شما یک ارزیاب اطلاعات هستید. تصمیم بگیرید که آیا پاسخ زیر به صورت مستقیم و به‌طور معتبری از متن‌های ارائه‌شده پشتیبانی می‌شود یا خیر. "
+            "فقط جواب 'SUPPORTED' یا 'NOT_SUPPORTED' را در یک شیٔ JSON تک‌خطی همراه با یک دلیل کوتاه (Farsi) بدهید.\n\n"
+            f"سوال: {answer}\n\n" + "\n\n".join(context_parts)
+        )
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "شما یک ارزیاب دقیق هستید که بررسی می‌کند آیا پاسخ بر اساس متن‌های ارائه شده پشتیبانی می‌شود یا خیر."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.0,
+                max_tokens=100,
+            )
+            txt = response.choices[0].message.content.strip()
+            import json
+            parsed = None
+            try:
+                parsed = json.loads(txt)
+            except Exception:
+                # fallback parse: look for SUPPORTED or NOT_SUPPORTED
+                if 'SUPPORTED' in txt.upper():
+                    return True, 'پاسخ با زمینه‌ها مطابقت دارد.'
+                return False, txt
+
+            result = parsed if isinstance(parsed, dict) else {}
+            status = result.get('status') or result.get('supported') or result.get('SUPPORTED')
+            reason = result.get('reason') or result.get('explanation') or ''
+            if isinstance(status, bool):
+                return status, reason
+            if isinstance(status, str) and status.strip().upper().startswith('S'):
+                return True, reason
+            return False, reason
+        except Exception:
+            return False, "خطا در ارزیابی پشتیبانی پاسخ از متن‌ها."
 
     def run_agent(self, question: str, history: List[Dict[str, str]], max_steps: int = 4) -> str:
         """
@@ -193,6 +272,9 @@ class RAGChatbot:
                 q_for_retrieve = payload
                 res_chunks = self.retrieve_relevant_chunks([q_for_retrieve])
                 chunks_cache = res_chunks
+                if not res_chunks:
+                    # If retrieval doesn't find relevant chunks, inform and stop.
+                    return "متاسفانه اطلاعات کافی برای پاسخ به سوال شما در پایگاه دانش ما وجود ندارد."
                 # Append tool output to messages
                 output_text = "\n\n".join([f"[{i+1}] {t} (meta: {m})" for i, (t, m) in enumerate(res_chunks)])
                 tool_outputs.append(output_text)
@@ -214,13 +296,31 @@ class RAGChatbot:
                 if not answer_text:
                     # If empty, try to generate a final answer using cached chunks
                     try:
-                        return self.generate_response(question, chunks_cache or [], history)
+                        candidate = self.generate_response(question, chunks_cache or [], history)
                     except Exception:
                         return "متاسفانه پاسخی تولید نشد."
-                return answer_text
+                    # validate generated candidate
+                    supported, reason = self.is_answer_supported(candidate, chunks_cache or [])
+                    if supported:
+                        return candidate
+                    else:
+                        return "متاسفانه اطلاعات کافی برای پاسخ به این سوال در پایگاه دانش موجود نیست."
+                # Validate the provided final answer as well
+                supported, reason = self.is_answer_supported(answer_text, chunks_cache or [])
+                if supported:
+                    return answer_text
+                # Fallback: try to produce a validated response
+                candidate = self.generate_response(question, chunks_cache or [], history)
+                supported2, reason2 = self.is_answer_supported(candidate, chunks_cache or [])
+                if supported2:
+                    return candidate
+                return "متاسفانه اطلاعات کافی برای پاسخ به این سوال در پایگاه دانش موجود نیست."
 
-            # Unknown action; return as final
-            return response_text
+            # Unknown action; assume this is final text; validate
+            supported, reason = self.is_answer_supported(response_text, chunks_cache or [])
+            if supported:
+                return response_text
+            return "متاسفانه اطلاعات کافی برای پاسخ به این سوال در پایگاه دانش موجود نیست."
 
 
     def generate_response(self, query: str, context_chunks: List[Tuple[str, Dict]], history: List[Dict]) -> str:
