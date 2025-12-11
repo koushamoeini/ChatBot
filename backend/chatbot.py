@@ -1,6 +1,5 @@
 # backend/chatbot.py
 import chromadb
-import numpy as np
 from sentence_transformers import SentenceTransformer
 import openai
 import os
@@ -8,18 +7,15 @@ from typing import List, Tuple, Dict, Any, Optional
 from chromadb.errors import NotFoundError
 
 class RAGChatbot:
-    def __init__(self, api_key: str, base_url: str = "https://api.tapsage.com/openai/v1", relevance_threshold: float = 0.6, low_confidence_threshold: float = 0.4, minimal_sim_threshold: float = 0.15):
+    def __init__(self, api_key: str, base_url: str = "https://api.tapsage.com/openai/v1"):
         # Embedding model
         self.embedding_model = SentenceTransformer("paraphrase-multilingual-mpnet-base-v2")
+        # Relevance gate: distances larger than this are considered off-topic
+        self.relevance_threshold = 1.2
         
         # OpenAI client
         self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
         self.model = "gpt-4o-mini"
-
-        # Relevance threshold for semantic similarity filtering (0..1 cosine similarity)
-        self.relevance_threshold = relevance_threshold
-        self.low_confidence_threshold = low_confidence_threshold
-        self.minimal_sim_threshold = minimal_sim_threshold
 
         # ChromaDB
         self.chroma_client = chromadb.PersistentClient(path="./chroma_db")
@@ -63,6 +59,13 @@ class RAGChatbot:
             return completion.choices[0].message.content.strip()
         except:
             return current_query
+
+    def is_greeting(self, text: str) -> bool:
+        if not text:
+            return False
+        t = text.strip().lower()
+        greetings = ["سلام", "hi", "hello", "درود", "hey"]
+        return any(g in t for g in greetings)
 
     def summarize_chunks(self, chunks: List[Tuple[str, Dict[str, Any]]]) -> str:
         """
@@ -124,107 +127,25 @@ class RAGChatbot:
         except:
             return [query]
 
-    def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
-        a = np.array(a)
-        b = np.array(b)
-        if a.size == 0 or b.size == 0:
-            return 0.0
-        denom = (np.linalg.norm(a) * np.linalg.norm(b))
-        if denom == 0:
-            return 0.0
-        return float(np.dot(a, b) / denom)
-
-    def is_greeting(self, text: str) -> bool:
-        """Return True if the input text looks like a greeting in Farsi."""
-        if not text or not isinstance(text, str):
-            return False
-        txt = text.strip().lower()
-        greetings = [
-            'سلام', 'درود', 'خوش آمدید', 'صبح بخیر', 'عصر بخیر', 'شب بخیر', 'حال شما', 'حالت چطوره', 'خوبی'
-        ]
-        for g in greetings:
-            if g in txt:
-                return True
-        return False
-
-    def retrieve_relevant_chunks(self, queries: List[str], n_results: int = 6, apply_threshold: bool = True) -> List[Tuple[str, Dict[str, Any]]]:
+    def retrieve_relevant_chunks(self, queries: List[str], n_results: int = 6) -> List[Tuple[str, Dict[str, Any]]]:
         seen = set()
         results = []
         for q in queries:
             emb = self.embedding_model.encode(q).tolist()
-            res = self.collection.query(query_embeddings=[emb], n_results=n_results)
+            res = self.collection.query(query_embeddings=[emb], n_results=n_results, include=["documents", "metadatas", "distances"])
             docs = res.get('documents', [[]])[0]
             metas = res.get('metadatas', [[]])[0]
-            for doc, meta in zip(docs, metas):
-                if doc in seen:
+            dists = res.get('distances', [[]])[0] if res.get('distances') else [None] * len(docs)
+            for doc, meta, dist in zip(docs, metas, dists):
+                # Filter out off-topic results based on distance
+                if dist is not None and dist > self.relevance_threshold:
                     continue
-                # compute similarity between query embedding and the document text embedding
-                try:
-                    doc_emb = self.embedding_model.encode(doc).tolist()
-                    sim = self._cosine_similarity(emb, doc_emb)
-                except Exception:
-                    sim = 0.0
-                if (not apply_threshold) or (sim >= self.relevance_threshold):
-                    # annotate meta with computed similarity for downstream processing/inspection
-                    meta = dict(meta) if isinstance(meta, dict) else {"source": str(meta)}
-                    meta["_similarity"] = sim
+                if doc not in seen:
                     seen.add(doc)
                     results.append((doc, meta))
         return results
 
-    def is_answer_supported(self, answer: str, chunks: List[Tuple[str, Dict[str, Any]]]) -> Tuple[bool, str]:
-        """
-        Ask the model to validate whether the `answer` is supported by the `chunks`.
-        Returns (supported_bool, reason_str).
-        """
-        if not chunks:
-            return False, "هیچ زمینه‌ای برای ارزیابی وجود ندارد."
-
-        context_parts = []
-        for i, (text, meta) in enumerate(chunks, 1):
-            title = meta.get("source_title", "منبع نامشخص") if isinstance(meta, dict) else "منبع"
-            snippet = text if len(text) < 300 else text[:300] + "..."
-            context_parts.append(f"منبع {i}: {title} — {snippet}")
-
-        prompt = (
-            "شما یک ارزیاب اطلاعات هستید. تصمیم بگیرید که آیا پاسخ زیر به صورت مستقیم و به‌طور معتبری از متن‌های ارائه‌شده پشتیبانی می‌شود یا خیر. "
-            "فقط جواب 'SUPPORTED' یا 'NOT_SUPPORTED' را در یک شیٔ JSON تک‌خطی همراه با یک دلیل کوتاه (Farsi) بدهید.\n\n"
-            f"سوال: {answer}\n\n" + "\n\n".join(context_parts)
-        )
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "شما یک ارزیاب دقیق هستید که بررسی می‌کند آیا پاسخ بر اساس متن‌های ارائه شده پشتیبانی می‌شود یا خیر."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.0,
-                max_tokens=100,
-            )
-            txt = response.choices[0].message.content.strip()
-            import json
-            parsed = None
-            try:
-                parsed = json.loads(txt)
-            except Exception:
-                # fallback parse: look for SUPPORTED or NOT_SUPPORTED
-                if 'SUPPORTED' in txt.upper():
-                    return True, 'پاسخ با زمینه‌ها مطابقت دارد.'
-                return False, txt
-
-            result = parsed if isinstance(parsed, dict) else {}
-            status = result.get('status') or result.get('supported') or result.get('SUPPORTED')
-            reason = result.get('reason') or result.get('explanation') or ''
-            if isinstance(status, bool):
-                return status, reason
-            if isinstance(status, str) and status.strip().upper().startswith('S'):
-                return True, reason
-            return False, reason
-        except Exception:
-            return False, "خطا در ارزیابی پشتیبانی پاسخ از متن‌ها."
-
-    def run_agent(self, question: str, history: List[Dict[str, str]], max_steps: int = 4, allow_general_knowledge: bool = False) -> str:
+    def run_agent(self, question: str, history: List[Dict[str, str]], max_steps: int = 4) -> str:
         """
         A simple agentic ReAct-style loop that lets the model call tools (retrieve/summarize) and then return a final answer.
 
@@ -244,19 +165,13 @@ class RAGChatbot:
             "- summarize(chunks): خلاصه کردن بخش‌های دریافت‌شده\n"
             "فرمت پاسخ‌ها باید یک شیٔ JSON تک‌خطی با کلیدهای 'action' و 'input' یا 'final' باشد.\n"
             "اگر آمادهٔ ارائه پاسخ نهایی هستید، از action='final' استفاده کنید و پاسخ را در 'input' قرار دهید.\n"
-            "همیشه به زبان فارسی پاسخ بدهید. \n"
-            "هرگز متن کامل ابزارهای بازیابی را عیناً در پاسخ نهایی تکرار نکنید؛ از ابزارها فقط برای استنتاج استفاده کنید." 
-            "اگر پاسخ شما مبتنی بر اطلاعات عمومی (خارج از پایگاه دانش) است و `allow_general_knowledge` فعال است، آن را با یک پیش‌نویس کوتاه 'ممکن است اطلاعات ناقص باشد' ارائه دهید."
+            "همیشه به زبان فارسی پاسخ بدهید."
         )
 
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"سوال اصلی: {question}\nتوضیح: اگر لازم است از ابزارها استفاده کن."}
         ]
-
-        # If the question is a greeting, reply immediately with a short friendly message.
-        if self.is_greeting(question):
-            return "سلام! خوش آمدید — چطور می‌تونم کمکتون کنم؟"
 
         tool_outputs: List[str] = []
         chunks_cache: Optional[List[Tuple[str, Dict[str, Any]]]] = None
@@ -293,29 +208,8 @@ class RAGChatbot:
                 q_for_retrieve = payload
                 res_chunks = self.retrieve_relevant_chunks([q_for_retrieve])
                 chunks_cache = res_chunks
-                if not res_chunks:
-                    # If retrieval doesn't find relevant chunks under strict threshold, try relaxed retrieval
-                    relaxed = self.retrieve_relevant_chunks([q_for_retrieve], apply_threshold=False, n_results=2)
-                    if not relaxed:
-                        # no matches at all
-                        return "متاسفانه اطلاعات کافی برای پاسخ به سوال شما در پایگاه دانش ما وجود ندارد."
-                    # choose highest similarity among relaxed results
-                    top_sim = max([m.get('_similarity', 0.0) for _, m in relaxed if isinstance(m, dict)] or [0.0])
-                    if top_sim < self.minimal_sim_threshold:
-                        return "متاسفانه اطلاعات کافی برای پاسخ به سوال شما در پایگاه دانش ما وجود ندارد."
-                    # use relaxed chunks but mark them low-confidence
-                    chunks_cache = relaxed
-                    for _, m in chunks_cache:
-                        if isinstance(m, dict):
-                            m['_low_confidence'] = True
                 # Append tool output to messages
-                # Only include short snippets of the retrieved chunk to avoid LLM copying full documents
-                def _snippet(text: str, size: int = 200):
-                    if not isinstance(text, str):
-                        text = str(text)
-                    return text if len(text) <= size else text[:size] + "..."
-
-                output_text = "\n\n".join([f"[{i+1}] { _snippet(t) } (meta: {m})" for i, (t, m) in enumerate(res_chunks)])
+                output_text = "\n\n".join([f"[{i+1}] {t} (meta: {m})" for i, (t, m) in enumerate(res_chunks)])
                 tool_outputs.append(output_text)
                 messages.append({"role": "assistant", "content": f"TOOL_OUTPUT_RETRIEVE: {output_text}"})
                 continue
@@ -330,43 +224,21 @@ class RAGChatbot:
                 continue
 
             if action == "final":
+                # If no relevant chunks and not a greeting, decline to answer
+                if (not chunks_cache or len(chunks_cache) == 0) and not self.is_greeting(question):
+                    return "این سوال در حوزهٔ داده‌های من نیست، لطفاً دربارهٔ مطالب موجود سوال کنید."
                 # Use the provided final answer
                 answer_text = str(payload or "")
                 if not answer_text:
                     # If empty, try to generate a final answer using cached chunks
                     try:
-                        candidate = self.generate_response(question, chunks_cache or [], history)
+                        return self.generate_response(question, chunks_cache or [], history)
                     except Exception:
                         return "متاسفانه پاسخی تولید نشد."
-                    # validate generated candidate
-                    supported, reason = self.is_answer_supported(candidate, chunks_cache or [])
-                    if supported:
-                        return candidate
-                    else:
-                        # If the agent retrieved only low-confidence matches, and general knowledge allowed, return best-effort
-                        if allow_general_knowledge and chunks_cache and any([m.get('_low_confidence') for _, m in chunks_cache if isinstance(m, dict)]):
-                            return "ممکن است اطلاعات ناقص باشد، اما بر اساس منابع موجود: " + candidate
-                        return "متاسفانه اطلاعات کافی برای پاسخ به این سوال در پایگاه دانش موجود نیست."
-                # Validate the provided final answer as well
-                supported, reason = self.is_answer_supported(answer_text, chunks_cache or [])
-                if supported:
-                    return answer_text
-                # Fallback: try to produce a validated response
-                candidate = self.generate_response(question, chunks_cache or [], history)
-                supported2, reason2 = self.is_answer_supported(candidate, chunks_cache or [])
-                if supported2:
-                    return candidate
-                if allow_general_knowledge and chunks_cache and any([m.get('_low_confidence') for _, m in chunks_cache if isinstance(m, dict)]):
-                    return "ممکن است اطلاعات ناقص باشد، اما بر اساس منابع موجود: " + candidate
-                return "متاسفانه اطلاعات کافی برای پاسخ به این سوال در پایگاه دانش موجود نیست."
+                return answer_text
 
-            # Unknown action; assume this is final text; validate
-            supported, reason = self.is_answer_supported(response_text, chunks_cache or [])
-            if supported:
-                return response_text
-            if allow_general_knowledge and chunks_cache and any([m.get('_low_confidence') for _, m in chunks_cache if isinstance(m, dict)]):
-                return "ممکن است اطلاعات ناقص باشد، اما بر اساس منابع موجود: " + response_text
-            return "متاسفانه اطلاعات کافی برای پاسخ به این سوال در پایگاه دانش موجود نیست."
+            # Unknown action; return as final
+            return response_text
 
 
     def generate_response(self, query: str, context_chunks: List[Tuple[str, Dict]], history: List[Dict]) -> str:
@@ -377,7 +249,9 @@ class RAGChatbot:
             return "OpenAI client is not initialized. Cannot generate response."
 
         if not context_chunks:
-            return "متاسفانه اطلاعات کافی برای پاسخ به سوال شما در پایگاه دانش من وجود ندارد."
+            if self.is_greeting(query):
+                return "سلام! خوشحال می‌شوم اگر دربارهٔ اطلاعات موجود سوال بپرسید."
+            return "این سوال در حوزهٔ داده‌های من نیست، لطفاً دربارهٔ مطالب موجود سوال کنید."
 
         context_parts = []
         for i, (text, meta) in enumerate(context_chunks, 1):
