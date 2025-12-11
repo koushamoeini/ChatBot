@@ -13,8 +13,10 @@ pip install -r requirements.txt
 ```
 3. Run the backend Django server:
 ```powershell
+# (Optional) Set the API key before running the server
+$env:API_KEY = '<YOUR_OPENAI_COMPAT_API_KEY>'
 python manage.py migrate
-python manage.py runserver
+python manage.py runserver 0.0.0.0:8000
 ```
 4. Open the frontend in your browser (Django serves it):
 ```powershell
@@ -29,6 +31,69 @@ python -m jupyter notebook
 2. Open `ingest.ipynb`, ensure the venv is active, and run the cells to populate `chroma_db`.
 
 The API key is read from the `API_KEY` environment variable (fallback default in `chatbot_app/views.py`). Set `API_KEY` before running the server for production deployments.
+
+Configuration and Environment Variables
+-------------------------------------
+- `API_KEY` (required): Your OpenAI-compatible API key used by the LLM client.
+- `RELEVANCE_THRESHOLD` (optional): Float between 0 and 1 for the cosine similarity filter (default 0.6). Higher means stricter matching. To set in PowerShell:
+```powershell
+$env:RELEVANCE_THRESHOLD = '0.6'
+```
+
+Populating the Vector DB (ChromaDB)
+---------------------------------
+The chat relies on a ChromaDB vector store for retrieval. If the collection is empty, you will get "اطلاعات کافی نیست" responses.
+
+1. Ensure your `knowledge_base.json` is prepared (each entry has `chunk_id`, `chunk_text`, `metadata`).
+2. Start Jupyter Notebook with the same virtual environment and open `ingest.ipynb`.
+```powershell
+python -m jupyter notebook
+```
+3. Run the cells in `ingest.ipynb` to create/overwrite the `farsi_rag_collection` in `./chroma_db`.
+
+Agentic RAG behavior (ReAct-style)
+---------------------------------
+This project uses an "agentic" RAG flow: the model can call small tools (retrieve and summarize) in a few steps and then produce a final answer. To reduce hallucinations:
+
+- Retrieval uses sentence-transformer embeddings and a cosine similarity filter (controlled by `RELEVANCE_THRESHOLD`) that rejects irrelevant chunks.
+- Final answers are validated against the retrieved context: if the LLM's answer isn't supported by the retrieved chunks, the system returns a polite "no data" message instead of hallucinating an answer.
+
+Usage Example (HTTP API)
+------------------------
+Endpoint: `POST /ask`
+Request Body:
+```json
+{
+    "question": "اطلاعات درباره سرویس X چیست؟",
+    "history": [{"role":"user","content":"سوال قبلی"}, {"role":"assistant","content":"پاسخ"}]
+}
+```
+Response (success):
+```json
+{
+    "answer": "پاسخ معتبر و پشتیبانی‌شده توسط متن‌های موجود..."
+}
+```
+If there is not enough relevant information: the server responds with a user-friendly message like:
+```json
+{ "answer": "متاسفانه اطلاعات کافی برای پاسخ به این سوال در پایگاه دانش موجود نیست." }
+```
+
+Troubleshooting
+---------------
+- If you see `ModuleNotFoundError: No module named 'chatbot'`, ensure you're running from repo root and that `backend` is a package (it is by default in this repo). Also use Django runserver (`python manage.py runserver`) instead of uvicorn.
+- If `chroma_db` is empty or collection `farsi_rag_collection` doesn't exist, run the ingestion (`ingest.ipynb`) to populate the DB.
+- If answers look too general/hallucinated, increase `RELEVANCE_THRESHOLD` or verify `chroma_db` contains valid chunks for the question.
+
+Security and production
+-----------------------
+- Do not store `API_KEY` directly in the repository. Use environment variables or secret management services.
+- For production deployments, configure a proper WSGI/ASGI server (e.g., `gunicorn` + `nginx`) and secure the API with authentication and HTTPS.
+
+Contributing and Tests
+----------------------
+- This repository contains `ingest.ipynb` to populate vectors. For contributions, please ensure your changes include tests or validation when possible and avoid committing sensitive data like API keys.
+
 
 This repository contains the code for a chatbot, developed across multiple phases, evolving from a simple keyword-based system to a more sophisticated RAG application with a web interface.
 
