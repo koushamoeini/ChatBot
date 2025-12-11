@@ -10,8 +10,8 @@ class RAGChatbot:
     def __init__(self, api_key: str, base_url: str = "https://api.tapsage.com/openai/v1"):
         # Embedding model
         self.embedding_model = SentenceTransformer("paraphrase-multilingual-mpnet-base-v2")
-        # Relevance gate: distances larger than this are considered off-topic
-        self.relevance_threshold = 1.2
+        # Optional relevance gate; set to None to keep all results
+        self.relevance_threshold = None
         
         # OpenAI client
         self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
@@ -149,8 +149,7 @@ class RAGChatbot:
             metas = res.get('metadatas', [[]])[0]
             dists = res.get('distances', [[]])[0] if res.get('distances') else [None] * len(docs)
             for doc, meta, dist in zip(docs, metas, dists):
-                # Filter out off-topic results based on distance
-                if dist is not None and dist > self.relevance_threshold:
+                if self.relevance_threshold is not None and dist is not None and dist > self.relevance_threshold:
                     continue
                 if doc not in seen:
                     seen.add(doc)
