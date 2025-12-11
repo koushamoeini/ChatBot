@@ -1,10 +1,40 @@
 # Chatbot Project
 
+Quick start (Windows / PowerShell):
+
+1. Create & activate a virtual environment
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+2. Install dependencies (root-level `requirements.txt`):
+```powershell
+pip install -r requirements.txt
+```
+3. Run the backend Django server:
+```powershell
+python manage.py migrate
+python manage.py runserver
+```
+4. Open the frontend in your browser (Django serves it):
+```powershell
+# Django will serve the frontend at http://127.0.0.1:8000
+```
+
+Or run the ingestion notebook:
+1. Start Jupyter:
+```powershell
+python -m jupyter notebook
+```
+2. Open `ingest.ipynb`, ensure the venv is active, and run the cells to populate `chroma_db`.
+
+The API key is read from the `API_KEY` environment variable (fallback default in `chatbot_app/views.py`). Set `API_KEY` before running the server for production deployments.
+
 This repository contains the code for a chatbot, developed across multiple phases, evolving from a simple keyword-based system to a more sophisticated RAG application with a web interface.
 
 ## Description
 
-A Python-based RAG (Retrieval-Augmented Generation) chatbot designed to answer questions based on a provided knowledge base. It leverages vector embeddings for semantic search, integrates with OpenAI-compatible language models, and features a FastAPI backend with a web frontend. 🗣️ 🌐
+A Python-based RAG (Retrieval-Augmented Generation) chatbot designed to answer questions based on a provided knowledge base. It leverages vector embeddings for semantic search, integrates with OpenAI-compatible language models, and features a Django backend with a web frontend. 🗣️ 🌐
 
 ---
 
@@ -31,9 +61,9 @@ This project uses Git tags to mark the end of each development phase.
 
 * **Phase 3 (`phase-3`)**: Backend API, Web UI, and Conversation History. ✨
     * **Architecture:** Implements a client-server model.
-    * **Backend:** A **FastAPI** application (`backend/main.py`) serves the chatbot logic via an `/ask` REST API endpoint. It encapsulates the core chatbot functions within a `RAGChatbot` class (`backend/chatbot.py`). Uses Uvicorn for serving.
-    * **Frontend:** A simple **Web UI** (`frontend/index.html`) using HTML and vanilla JavaScript allows users to interact with the chatbot through their browser. It communicates with the FastAPI backend via `fetch` requests. Includes basic chat styling, message display, and a typing indicator.
+    * **Backend:** A **Django** application (Django project in `web/` and `chatbot_app`) serves the chatbot logic via an `/ask` REST endpoint. It encapsulates the core chatbot functions within a `RAGChatbot` class (`backend/chatbot.py`). Django serves the frontend template and serves the static assets during development.
+    * **Frontend:** A simple **Web UI** (`templates/index.html`) using HTML and vanilla JavaScript allows users to interact with the chatbot through their browser. It communicates with the Django backend via `fetch` requests. Includes basic chat styling, message display, and a typing indicator.
     * **Conversation Context:** Introduces **query rewriting** (`rewrite_query` in `backend/chatbot.py`). Before retrieval, the LLM reframes the user's latest question using the recent conversation history (last few turns) to make it a standalone, contextually complete query.
     * **Ingestion Improvement:** The ingestion script (`ingest.ipynb`) now **enriches the text *before* embedding**. It prepends metadata (like source title and parent category) to the chunk text to potentially create more contextually rich embeddings for better retrieval, while still storing the original text in the database for display/generation.
     * **Generation Enhancement:** The prompt sent to the LLM for the final answer now includes formatted context chunks *with their metadata* (source, URL) and the recent conversation history, allowing for more informed and potentially source-citing responses.
-    * **Dependencies:** Managed via `requirements.txt`, including `fastapi`, `uvicorn`, `chromadb`, `sentence-transformers`, `openai`, `python-dotenv`. CORS middleware is configured in FastAPI.
+    * **Dependencies:** Managed via `requirements.txt`, including `django`, `gunicorn`, `chromadb`, `sentence-transformers`, `openai`, `python-dotenv`.

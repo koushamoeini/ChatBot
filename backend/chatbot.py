@@ -4,6 +4,7 @@ from sentence_transformers import SentenceTransformer
 import openai
 import os
 from typing import List, Tuple, Dict, Any
+from chromadb.errors import NotFoundError
 
 class RAGChatbot:
     def __init__(self, api_key: str, base_url: str = "https://api.tapsage.com/openai/v1"):
@@ -15,8 +16,12 @@ class RAGChatbot:
         self.model = "gpt-4o-mini"
 
         # ChromaDB
-        self.chroma_client = chromadb.PersistentClient(path="../chroma_db")
-        self.collection = self.chroma_client.get_collection(name="farsi_rag_collection")
+        self.chroma_client = chromadb.PersistentClient(path="./chroma_db")
+        try:
+            self.collection = self.chroma_client.get_collection(name="farsi_rag_collection")
+        except NotFoundError:
+            # Ensure the collection exists before querying
+            self.collection = self.chroma_client.create_collection(name="farsi_rag_collection")
 
     def rewrite_query(self, current_query: str, history: List[Dict[str, str]]) -> str:
         if not history:

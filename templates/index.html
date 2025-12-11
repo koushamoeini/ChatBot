@@ -1,0 +1,31 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ربات پشتیبانی هوشمند</title>
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'css/chat.css' %}">
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            🤖 ربات پشتیبانی هوشمند
+        </div>
+        <div id="chat">
+            <div class="message bot">سلام! من ربات پشتیبانی هستم. چطور می‌تونم کمکتون کنم؟</div>
+        </div>
+        <div class="input-area">
+            <input type="text" id="question" placeholder="سوال خود را بنویسید..." autocomplete="off" />
+            <button id="send-btn" onclick="ask()">ارسال</button>
+            <button id="clear-btn" onclick="clearChat()">پاک کردن</button>
+        </div>
+    </div>
+
+    <script src="{% static 'js/chat.js' %}"></script>
+    <script>
+        window.CHAT_API_URL = '/ask';
+    </script>
+</body>
+</html>

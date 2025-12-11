@@ -1,0 +1,30 @@
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Database files
+db.sqlite3
+
+# ChromaDB and other vector DB binaries
+chroma_db/
+
+# Django static files
+static/
+
+# VSCode settings
+.vscode/
+
+# Environment files
+.env
+*.env
+
+# macOS
+.DS_Store
