@@ -14,7 +14,13 @@ class RAGChatbot:
         # Embedding model
         self.embedding_model = SentenceTransformer("paraphrase-multilingual-mpnet-base-v2")
         # Optional relevance gate; set to None to keep all results
-        self.relevance_threshold = None
+        # Note: distance semantics depend on the Chroma collection metric.
+        # We keep it configurable via env to avoid hardcoding a threshold.
+        rt = os.environ.get("RELEVANCE_THRESHOLD")
+        self.relevance_threshold = float(rt) if rt not in (None, "") else None
+
+        # Whether to use the tool-calling agent loop. Default is OFF (safer, like the original code).
+        self.agent_mode = os.environ.get("AGENT_MODE", "false").lower() in ("1", "true", "yes")
         
         # OpenAI client
         self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
@@ -162,6 +168,21 @@ class RAGChatbot:
                     results.append((doc, meta))
         return results
 
+    def answer(self, question: str, history: List[Dict[str, str]], allow_general_knowledge: bool = False) -> str:
+        """Non-agent RAG path with strict retrieval gating (like the original version)."""
+        standalone = self.rewrite_query(question, history)
+        expanded = self.expand_query(standalone)
+        chunks = self.retrieve_relevant_chunks(expanded)
+
+        if not chunks:
+            if self.is_greeting(question):
+                return "سلام! خوشحال می‌شوم اگر دربارهٔ اطلاعات موجود سوال بپرسید."
+            if allow_general_knowledge:
+                return self.generate_response(question, [], history, allow_general_knowledge=True)
+            return "متاسفانه اطلاعات کافی برای پاسخ به سوال شما در پایگاه دانش من وجود ندارد."
+
+        return self.generate_response(question, chunks, history, allow_general_knowledge=allow_general_knowledge)
+
     def run_agent(
         self,
         question: str,
@@ -169,8 +190,17 @@ class RAGChatbot:
         max_steps: int = 4,
         allow_general_knowledge: bool = False,
     ) -> str:
+        """Answer a question.
+
+        Default behavior (AGENT_MODE=false): strict retrieval gating + generate from retrieved chunks only.
+        Optional behavior (AGENT_MODE=true): tool-calling loop.
         """
-        A simple agentic ReAct-style loop that lets the model call tools (retrieve/summarize) and then return a final answer.
+
+        if not self.agent_mode:
+            return self.answer(question, history, allow_general_knowledge=allow_general_knowledge)
+
+        """
+        Agentic ReAct-style loop that lets the model call tools (retrieve/summarize) and then return a final answer.
 
         Action format expected from LLM (in a single JSON object in a single line):
         {"action": "retrieve", "input": "<query>"}
@@ -220,8 +250,8 @@ class RAGChatbot:
                 action = parsed.get("action")
                 payload = parsed.get("input")
             except Exception:
-                # If parsing fails, assume final answer is present as plain text
-                return response_text
+                # If parsing fails, do NOT return a free-form answer in strict mode; fall back to gated RAG.
+                return self.answer(question, history, allow_general_knowledge=allow_general_knowledge)
 
             if action == "retrieve":
                 # Use the agent's retrieve tool
@@ -254,20 +284,16 @@ class RAGChatbot:
                     and not self.is_greeting(question)
                 ):
                     return "این سوال در حوزهٔ داده‌های من نیست، لطفاً دربارهٔ مطالب موجود سوال کنید."
-                # Use the provided final answer
-                answer_text = str(payload or "")
-                if not answer_text:
-                    # If empty, try to generate a final answer using cached chunks
-                    try:
-                        return self.generate_response(
-                            question,
-                            chunks_cache or [],
-                            history,
-                            allow_general_knowledge=allow_general_knowledge,
-                        )
-                    except Exception:
-                        return "متاسفانه پاسخی تولید نشد."
-                return self._strip_tool_outputs(answer_text)
+                # Generate the final answer from retrieved chunks to keep responses grounded.
+                try:
+                    return self.generate_response(
+                        question,
+                        chunks_cache or [],
+                        history,
+                        allow_general_knowledge=allow_general_knowledge,
+                    )
+                except Exception:
+                    return "متاسفانه پاسخی تولید نشد."
 
             # Unknown action; return as final but sanitized
             return self._strip_tool_outputs(response_text)
