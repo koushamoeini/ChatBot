@@ -156,7 +156,13 @@ class RAGChatbot:
                     results.append((doc, meta))
         return results
 
-    def run_agent(self, question: str, history: List[Dict[str, str]], max_steps: int = 4) -> str:
+    def run_agent(
+        self,
+        question: str,
+        history: List[Dict[str, str]],
+        max_steps: int = 4,
+        allow_general_knowledge: bool = False,
+    ) -> str:
         """
         A simple agentic ReAct-style loop that lets the model call tools (retrieve/summarize) and then return a final answer.
 
@@ -235,15 +241,24 @@ class RAGChatbot:
                 continue
 
             if action == "final":
-                # If no relevant chunks and not a greeting, decline to answer
-                if (not chunks_cache or len(chunks_cache) == 0) and not self.is_greeting(question):
+                # If no relevant chunks and not a greeting, optionally allow general knowledge answers
+                if (
+                    not allow_general_knowledge
+                    and (not chunks_cache or len(chunks_cache) == 0)
+                    and not self.is_greeting(question)
+                ):
                     return "این سوال در حوزهٔ داده‌های من نیست، لطفاً دربارهٔ مطالب موجود سوال کنید."
                 # Use the provided final answer
                 answer_text = str(payload or "")
                 if not answer_text:
                     # If empty, try to generate a final answer using cached chunks
                     try:
-                        return self.generate_response(question, chunks_cache or [], history)
+                        return self.generate_response(
+                            question,
+                            chunks_cache or [],
+                            history,
+                            allow_general_knowledge=allow_general_knowledge,
+                        )
                     except Exception:
                         return "متاسفانه پاسخی تولید نشد."
                 return self._strip_tool_outputs(answer_text)
@@ -252,29 +267,41 @@ class RAGChatbot:
             return self._strip_tool_outputs(response_text)
 
 
-    def generate_response(self, query: str, context_chunks: List[Tuple[str, Dict]], history: List[Dict]) -> str:
+    def generate_response(
+        self,
+        query: str,
+        context_chunks: List[Tuple[str, Dict]],
+        history: List[Dict],
+        allow_general_knowledge: bool = False,
+    ) -> str:
         """
         Generates a final response using the LLM based on the query and retrieved context (with metadata).
         """
         if not self.client:
             return "OpenAI client is not initialized. Cannot generate response."
 
-        if not context_chunks:
+        has_context = bool(context_chunks)
+
+        if not has_context and not allow_general_knowledge:
             if self.is_greeting(query):
                 return "سلام! خوشحال می‌شوم اگر دربارهٔ اطلاعات موجود سوال بپرسید."
             return "این سوال در حوزهٔ داده‌های من نیست، لطفاً دربارهٔ مطالب موجود سوال کنید."
 
         context_parts = []
-        for i, (text, meta) in enumerate(context_chunks, 1):
-            source_title = meta.get("source_title", "منبع نامشخص")
-            parent_cat = meta.get("parent_category")
-            ref = f"منبع {i}: بخش «{source_title}»"
-            if parent_cat:
-                ref += f" (زیرمجموعهٔ «{parent_cat}»)"
-            url = meta.get("source_url", "").strip()
-            if url and url != "N/A":
-                ref += f" — لینک: {url}"
-            context_parts.append(f"{ref}\nمتن مرتبط: {text}")
+        if has_context:
+            for i, (text, meta) in enumerate(context_chunks, 1):
+                source_title = meta.get("source_title", "منبع نامشخص")
+                parent_cat = meta.get("parent_category")
+                ref = f"منبع {i}: بخش «{source_title}»"
+                if parent_cat:
+                    ref += f" (زیرمجموعهٔ «{parent_cat}»)"
+                url = meta.get("source_url", "").strip()
+                if url and url != "N/A":
+                    ref += f" — لینک: {url}"
+                context_parts.append(f"{ref}\nمتن مرتبط: {text}")
+        else:
+            # Allow LLM to answer cautiously without specific context when permitted
+            context_parts.append("هیچ زمینهٔ مشخصی یافت نشد؛ در صورت نیاز با دانش عمومی و لحن محتاط پاسخ بده.")
 
         context_string = "\n\n---\n\n".join(context_parts)
 
@@ -298,6 +325,9 @@ class RAGChatbot:
         «برای اطلاعات بیشتر می‌توانید به بخش (عنوان بخش) در سایت ما مراجعه کنید: [لینک]»
         ***شما باید همیشه و فقط به زبان فارسی پاسخ دهید.***
         """
+
+        if allow_general_knowledge:
+            system_prompt += "\nاگر زمینه‌ای موجود نیست، می‌توانید با دانش عمومی ولی با لحن محتاط و کوتاه پاسخ دهید."
 
         user_prompt = f"زمینه: \"{context_string}\"\nتاریخچه گفتمان: {history_section}\n\nسوال فعلی: \"{query}\""
 
