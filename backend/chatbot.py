@@ -4,7 +4,10 @@ from sentence_transformers import SentenceTransformer
 import openai
 import os
 from typing import List, Tuple, Dict, Any, Optional
-from chromadb.errors import NotFoundError
+try:
+    from chromadb.errors import NotFoundError
+except ImportError:
+    from chromadb.errors import InvalidCollectionException as NotFoundError
 
 class RAGChatbot:
     def __init__(self, api_key: str, base_url: str = "https://api.tapsage.com/openai/v1"):
@@ -21,7 +24,10 @@ class RAGChatbot:
         self.chroma_client = chromadb.PersistentClient(path="./chroma_db")
         try:
             self.collection = self.chroma_client.get_collection(name="farsi_rag_collection")
-        except NotFoundError:
+        except (NotFoundError, ValueError) as exc:
+            # Some chromadb versions raise ValueError when the collection is absent
+            if isinstance(exc, ValueError) and "does not exist" not in str(exc):
+                raise
             # Ensure the collection exists before querying
             self.collection = self.chroma_client.create_collection(name="farsi_rag_collection")
 

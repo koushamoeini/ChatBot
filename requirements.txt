@@ -5,3 +5,4 @@ sentence-transformers
 openai
 python-dotenv
 langchain==0.0.286
+python-telegram-bot==20.7
